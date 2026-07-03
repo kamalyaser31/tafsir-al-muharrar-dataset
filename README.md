@@ -25,6 +25,7 @@
 │   ├── json_generator.py             # توليد ملفات JSON من الأصول المحلية
 │   ├── validator.py                  # مطابقة مخرجات JSON مع HTML والتحقق من البصمات
 │   ├── get_tafsir.py                 # أداة CLI محلية لعرض وتصفية نصوص السور والآيات
+│   ├── tafseer_gui.py                # واجهة رسومية محلية لتصفح ملفات JSON
 │   └── run_tests.py                  # سكربت الاختبارات المؤتمت الشامل
 ├── tafseer_all.json                  # ملف JSON موحد يضم السور المكتملة (~71 ميجابايت)
 ├── هيكل_الصفحات.md                   # توثيق معرفات وكلاسات HTML المعتمدة في التصفية
@@ -134,6 +135,14 @@
   * `-s`, `--sci`: عرض الفوائد العلمية واللطائف.
   * `--no-ref`: إيقاف عرض الحواشي تماماً.
 
+### 1.1. الواجهة الرسومية المحلية (`scripts/tafseer_gui.py`)
+واجهة سطح مكتب مبنية على `wxPython` لتصفح السور والنطاقات وتصدير النص المعروض بصيغة Markdown.
+
+* **أمر التشغيل**:
+  ```powershell
+  python scripts/tafseer_gui.py
+  ```
+
 ### 2. سكربت التحميل التلقائي (`scripts/downloader.py`)
 يتولى الاتصال برابط التفسير الرئيسي في موقع الدرر السنية وتتبع صفحات كل سورة بالتنقل الآلي وحفظها بصيغة HTML خام داخل مجلد `tafseer html/`، مع تتبع تقدم التنزيل في `progress.json` لتسهيل استئناف العمل عند الانقطاع.
 
@@ -173,10 +182,11 @@
 * `requests`
 * `pyarabic`
 * `progress`
+* `wxPython` لتشغيل الواجهة الرسومية
 
 * **أمر التثبيت السريع**:
   ```powershell
-  python -m pip install beautifulsoup4 requests pyarabic progress
+  python -m pip install beautifulsoup4 requests pyarabic progress wxPython
   ```
 
 ---
@@ -203,4 +213,3 @@
 للاستفسار، أو تبادل الآراء، أو التعاون المشترك لتطوير المشروع:
 * **البريد الإلكتروني**: kamalyaser31@gmail.com
 * **تليجرام**: [t.me/kamalyaser31](https://t.me/kamalyaser31)
-
