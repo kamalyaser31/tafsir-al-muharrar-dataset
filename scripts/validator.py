@@ -13,12 +13,14 @@ from helpers import (
     article_body_text,
     classify_benefit_section,
     classify_section,
+    clean_arabic_text,
     empty_references,
     extract_clean_text_without_references,
     extract_reference_tips,
     find_content_card,
     has_inline_numbered_note,
     normalize_text,
+    reference_text_marker,
     sha256_text,
     split_embedded_tafseer_text,
 )
@@ -26,7 +28,7 @@ from json_generator import extract_verses_from_tafseer_article, split_references
 
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-SOURCE_TAFSEER_DIR = PROJECT_DIR / "التفسير"
+SOURCE_TAFSEER_DIR = PROJECT_DIR / "tafseer html"
 OUTPUT_JSON_DIR = PROJECT_DIR / "json"
 UNIFIED_JSON_PATH = PROJECT_DIR / "tafseer_all.json"
 VALIDATION_REPORT_PATH = PROJECT_DIR / "json_validation_report.txt"
@@ -66,7 +68,7 @@ def extract_source_section_hashes(html_path):
         if section == "benefits":
             header_text = article.find(SECTION_HEADINGS).get_text(strip=True)
             benefit_section = classify_benefit_section(header_text)
-            hashes[benefit_section] = sha256_text(f"{header_text}\n{text}")
+            hashes[benefit_section] = sha256_text(f"{clean_arabic_text(header_text)}\n{text}")
         elif section == "general_meaning":
             general_text, embedded_tafseer = split_embedded_tafseer_text(text)
             hashes["general_meaning"] = sha256_text(general_text)
@@ -80,6 +82,7 @@ def extract_source_section_hashes(html_path):
 def extract_source_verses(html_path):
     soup = BeautifulSoup(Path(html_path).read_text(encoding="utf-8"), "html.parser")
     card, _ = find_content_card(soup)
+    verse_range = source_page_range(Path(html_path))
 
     for article in card.find_all("article"):
         header = article.find(SECTION_HEADINGS)
@@ -88,7 +91,7 @@ def extract_source_verses(html_path):
         section = classify_section(header.get_text(strip=True))
         if section not in {"tafseer", "general_meaning"}:
             continue
-        verses = extract_verses_from_tafseer_article(article)
+        verses = extract_verses_from_tafseer_article(article, verse_range)
         if verses:
             return verses
     return None
@@ -320,6 +323,10 @@ def validate_page(surah_num, page, source, result):
     for text_field in ("vocabulary", "general_meaning", "tafseer", "grammar", "balagha", "educational_benefits", "scientific_benefits"):
         if has_inline_numbered_note(page.get(text_field)):
             result.errors.append(f"{prefix}: field '{text_field}' still contains inline numbered reference notes.")
+        if contains_forbidden_spacing(page.get(text_field)):
+            result.errors.append(f"{prefix}: field '{text_field}' contains non-normalized invisible or non-breaking spacing.")
+
+    validate_reference_markers(prefix, page, result)
 
     validate_source_html_hashes(prefix, page, source, result)
 
@@ -387,6 +394,34 @@ def validate_source_html_hashes(prefix, page, source, result):
 
         if sha256_text(page.get(section)) != actual:
             result.errors.append(f"{prefix}: stored text does not match stored hash for section '{section}'.")
+
+
+def contains_forbidden_spacing(text):
+    return bool(text and any(char in text for char in ("\u00a0", "\u2007", "\u202f", "\u200e", "\u200f", "\ufeff")))
+
+
+def validate_reference_markers(prefix, page, result):
+    references = page.get("references")
+    if not isinstance(references, dict):
+        return
+
+    for section, section_references in references.items():
+        if contains_forbidden_spacing(page.get(section)):
+            result.errors.append(f"{prefix}: field '{section}' contains forbidden spacing characters.")
+        if not isinstance(section_references, list):
+            result.errors.append(f"{prefix}: references section '{section}' must be a list.")
+            continue
+
+        text = page.get(section) or ""
+        for reference in section_references:
+            marker = reference_text_marker(reference)
+            if not marker:
+                result.errors.append(f"{prefix}: reference in section '{section}' does not start with a normalized numeric marker.")
+                continue
+            if marker not in text:
+                result.errors.append(f"{prefix}: reference marker {marker} is missing from field '{section}'.")
+            if contains_forbidden_spacing(reference):
+                result.errors.append(f"{prefix}: reference {marker} in section '{section}' contains forbidden spacing characters.")
 
 
 def source_html_path_for_page(page, source):

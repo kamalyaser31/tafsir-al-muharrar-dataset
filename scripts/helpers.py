@@ -28,6 +28,15 @@ REFERENCE_NOTE_STARTERS = (
     "حسَّنه",
 )
 REFERENCE_NOTE_STARTER_PATTERN = "|".join(re.escape(item) for item in REFERENCE_NOTE_STARTERS)
+REFERENCE_MARKER_PATTERN = re.compile(r"\[\s*([\d\s]+)\s*\]")
+INVISIBLE_TEXT_CHARS = str.maketrans({
+    "\u00a0": " ",
+    "\u2007": " ",
+    "\u202f": " ",
+    "\u200e": "",
+    "\u200f": "",
+    "\ufeff": "",
+})
 
 
 def normalize_text(text):
@@ -48,6 +57,7 @@ def bare_reference_note_match(text):
 
 
 def clean_arabic_text(text):
+    text = (text or "").translate(INVISIBLE_TEXT_CHARS)
     return re.sub(r"[ \t]+", " ", text)
 
 
@@ -95,14 +105,43 @@ def is_reference_tip(tag):
     return "tip" in tag.get("class", [])
 
 
+def normalize_reference_marker_text(text):
+    match = REFERENCE_MARKER_PATTERN.search(clean_arabic_text(text))
+    if not match:
+        return ""
+    digits = re.sub(r"\s+", "", match.group(1))
+    return f"[{digits}]" if digits else ""
+
+
+def reference_tip_internal_marker(tip):
+    return normalize_reference_marker_text(tip.get_text("", strip=True))
+
+
+def previous_reference_marker(tip):
+    for sibling in tip.previous_siblings:
+        text = sibling.get_text(" ", strip=True) if hasattr(sibling, "get_text") else str(sibling)
+        text = clean_arabic_text(text).strip()
+        if not text:
+            continue
+        match = re.search(r"\[\s*([\d\s]+)\s*\]\s*$", text)
+        if match:
+            return normalize_reference_marker_text(match.group(0))
+        break
+    return ""
+
+
 def reference_tip_marker(tip):
-    match = re.match(r"\s*(\[\d+\])", tip.get_text(" ", strip=True))
-    return match.group(1) if match else ""
+    return reference_tip_internal_marker(tip) or previous_reference_marker(tip)
+
+
+def reference_tip_text(tip, marker):
+    text = visible_text_from_html(str(tip))
+    text = REFERENCE_MARKER_PATTERN.sub("", text, count=1).strip()
+    return f"{marker} {text}".strip() if marker else text
 
 
 def reference_text_marker(text):
-    match = re.match(r"\s*(\[\d+\])", text or "")
-    return match.group(1) if match else ""
+    return normalize_reference_marker_text(text or "")
 
 
 def has_reference_tip_ancestor(node):
@@ -117,6 +156,33 @@ def has_reference_tip_ancestor(node):
 def bare_reference_text(text):
     lines = [clean_arabic_text(line).strip() for line in (text or "").splitlines() if line.strip()]
     return "\n".join(lines).strip()
+
+
+def next_synthetic_marker(used_markers):
+    numbers = []
+    for marker in used_markers:
+        match = re.match(r"\[(\d+)\]", marker)
+        if match:
+            numbers.append(int(match.group(1)))
+    number = max(numbers, default=0) + 1
+    marker = f"[{number}]"
+    used_markers.add(marker)
+    return marker
+
+
+def collect_reference_markers(element):
+    markers = set()
+    for tip in element.find_all(is_reference_tip):
+        marker = reference_tip_marker(tip)
+        if marker:
+            markers.add(marker)
+    for node in element.find_all(string=True):
+        if has_reference_tip_ancestor(node):
+            continue
+        marker = reference_text_marker(str(node))
+        if marker:
+            markers.add(marker)
+    return markers
 
 
 def is_embedded_tafseer_heading(text):
@@ -142,12 +208,23 @@ def remove_reference_tips(element):
 
 
 def replace_reference_tips_with_markers(element):
+    used_markers = collect_reference_markers(element)
+    replacements = []
     for tip in list(element.find_all(is_reference_tip)):
-        marker = reference_tip_marker(tip)
-        if marker:
-            tip.replace_with(f" {marker} ")
+        internal_marker = reference_tip_internal_marker(tip)
+        marker = internal_marker or previous_reference_marker(tip)
+        if internal_marker:
+            replacements.append((tip, f" {marker} "))
+        elif marker:
+            replacements.append((tip, None))
         else:
+            replacements.append((tip, f" {next_synthetic_marker(used_markers)} "))
+
+    for tip, replacement in replacements:
+        if replacement is None:
             tip.decompose()
+        else:
+            tip.replace_with(replacement)
 
 
 def replace_bare_reference_notes_with_markers(element):
@@ -161,9 +238,11 @@ def replace_bare_reference_notes_with_markers(element):
 
 def extract_reference_tips(article):
     references = []
+    used_markers = collect_reference_markers(article)
     for node in article.descendants:
         if getattr(node, "name", None) and is_reference_tip(node):
-            text = visible_text_from_html(str(node))
+            marker = reference_tip_marker(node) or next_synthetic_marker(used_markers)
+            text = reference_tip_text(node, marker)
             if text:
                 references.append(text)
             continue

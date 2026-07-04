@@ -13,10 +13,12 @@ from helpers import (
     article_body_text,
     classify_benefit_section,
     classify_section,
+    clean_arabic_text,
     empty_references,
     extract_clean_text_without_references,
     extract_reference_tips,
     find_content_card,
+    has_reference_tip_ancestor,
     normalize_arabic_heading,
     reference_text_marker,
     sha256_text,
@@ -37,7 +39,7 @@ except ImportError:
             pass
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-SOURCE_TAFSEER_DIR = PROJECT_DIR / "التفسير"
+SOURCE_TAFSEER_DIR = PROJECT_DIR / "tafseer html"
 OUTPUT_JSON_DIR = PROJECT_DIR / "json"
 REPORT_PATH = PROJECT_DIR / "json_generation_report.txt"
 UNIFIED_JSON_PATH = PROJECT_DIR / "tafseer_all.json"
@@ -88,7 +90,35 @@ def has_verse_class(tag):
 
 
 def verse_spans(article):
-    return article.find_all("span", class_=lambda value: value in {"aaya", "aya"})
+    return [
+        tag for tag in article.find_all("span")
+        if has_verse_class(tag) and not has_reference_tip_ancestor(tag)
+    ]
+
+
+def parse_verse_range_bounds(range_text):
+    match = re.match(r"^(\d+)(?:[-–—](\d+))?$", range_text or "")
+    if not match:
+        return None
+    start = int(match.group(1))
+    end = int(match.group(2) or start)
+    return (start, end) if end >= start else None
+
+
+def verse_number_in_range(number, verse_range):
+    bounds = parse_verse_range_bounds(verse_range)
+    if not bounds:
+        return True
+    start, end = bounds
+    return start <= number <= end
+
+
+def expected_verse_count(verse_range):
+    bounds = parse_verse_range_bounds(verse_range)
+    if not bounds:
+        return None
+    start, end = bounds
+    return end - start + 1
 
 
 def is_nested_aaya_span(span):
@@ -132,24 +162,30 @@ def format_verses(verses):
     return f"« {' * '.join(verses)} »" if verses else None
 
 
-def add_numbered_verse(verses, seen_numbers, span, number):
+def add_numbered_verse(verses, seen_numbers, span, number, verse_range=None):
     if number in seen_numbers:
+        return
+    if not verse_number_in_range(number, verse_range):
         return
     text = span.get_text(" ", strip=True)
     verses.append(re.sub(r"\s*\(\d+\)\s*", "", text).strip())
     seen_numbers.add(number)
 
 
-def extract_numbered_or_gap_verses(article):
+def extract_numbered_or_gap_verses(article, verse_range=None):
     verses, seen, seen_numbers = [], set(), set()
     spans = [span for span in verse_spans(article) if not is_nested_aaya_span(span)]
     previous_number = None
+    expected_count = expected_verse_count(verse_range)
 
     for index, span in enumerate(spans):
         number = verse_number_from_span(span)
         if number is not None:
-            add_numbered_verse(verses, seen_numbers, span, number)
-            previous_number = number
+            if verse_number_in_range(number, verse_range):
+                add_numbered_verse(verses, seen_numbers, span, number, verse_range)
+                previous_number = number
+                if expected_count and len(seen_numbers) >= expected_count:
+                    break
             continue
 
         next_number = next_numbered_span_number(spans, index)
@@ -159,20 +195,23 @@ def extract_numbered_or_gap_verses(article):
     return verses
 
 
-def extract_unnumbered_main_verses(article):
+def extract_unnumbered_main_verses(article, verse_range=None):
     verses, seen = [], set()
+    expected_count = expected_verse_count(verse_range)
     for span in verse_spans(article):
         if is_nested_aaya_span(span):
             continue
         if is_main_unnumbered_verse_span(span):
             add_unique_verse(verses, seen, span.get_text(" ", strip=True))
+            if expected_count and len(verses) >= expected_count:
+                break
     return verses
 
 
-def extract_verses_from_tafseer_article(article):
-    verses = extract_numbered_or_gap_verses(article)
+def extract_verses_from_tafseer_article(article, verse_range=None):
+    verses = extract_numbered_or_gap_verses(article, verse_range)
     if not verses:
-        verses = extract_unnumbered_main_verses(article)
+        verses = extract_unnumbered_main_verses(article, verse_range)
     return format_verses(verses)
 
 
@@ -212,12 +251,13 @@ def split_references_by_text(references, primary_text, secondary_text):
     return primary_references, secondary_references
 
 
-def apply_article_section(page_data, article):
+def apply_article_section(page_data, article, verse_range=None):
     header = article.find(SECTION_HEADINGS)
     if not header:
         return
 
     header_text = header.get_text(strip=True)
+    clean_header_text = clean_arabic_text(header_text)
     section = classify_section(header_text)
     if not section:
         return
@@ -231,12 +271,12 @@ def apply_article_section(page_data, article):
 
     if section == "tafseer":
         page_data["references"][reference_section].extend(references)
-        page_data["verses"] = extract_verses_from_tafseer_article(article) or page_data["verses"]
+        page_data["verses"] = extract_verses_from_tafseer_article(article, verse_range) or page_data["verses"]
         page_data["tafseer"] = text
         page_data["section_sha256"][section] = sha256_text(text)
     elif section == "benefits":
         page_data["references"][reference_section].extend(references)
-        benefit_text = f"{header_text}\n{text}"
+        benefit_text = f"{clean_header_text}\n{text}"
         page_data[reference_section] = benefit_text
         page_data["section_sha256"][reference_section] = sha256_text(benefit_text)
     elif section == "general_meaning":
@@ -244,7 +284,7 @@ def apply_article_section(page_data, article):
         general_references, tafseer_references = split_references_by_text(references, general_text, embedded_tafseer)
 
         if not page_data["verses"]:
-            page_data["verses"] = extract_verses_from_tafseer_article(article) or page_data["verses"]
+            page_data["verses"] = extract_verses_from_tafseer_article(article, verse_range) or page_data["verses"]
         page_data["general_meaning"] = general_text
         page_data["references"]["general_meaning"].extend(general_references)
         page_data["section_sha256"]["general_meaning"] = sha256_text(general_text)
@@ -259,7 +299,7 @@ def apply_article_section(page_data, article):
         page_data["section_sha256"][section] = sha256_text(text)
 
 
-def parse_tafseer_html(html_path, is_intro=False):
+def parse_tafseer_html(html_path, is_intro=False, verse_range=None):
     html_content = Path(html_path).read_text(encoding="utf-8")
     soup = BeautifulSoup(html_content, "html.parser")
     card, fallback_used = find_content_card(soup)
@@ -270,7 +310,7 @@ def parse_tafseer_html(html_path, is_intro=False):
     page_data = empty_page_data()
 
     for article in card.find_all("article"):
-        apply_article_section(page_data, article)
+        apply_article_section(page_data, article, verse_range)
 
     return {"page_data": page_data, "fallback_used": fallback_used}
 
@@ -357,9 +397,13 @@ def new_surah_data(surah):
 def process_html_file(surah, filename, surah_data, report):
     html_path = Path(surah["path"]) / filename
     is_intro = filename == "المقدمة.html"
+    verse_range = None
+    if not is_intro:
+        stem = Path(filename).stem
+        verse_range = stem if parse_verse_range(stem) else extract_verse_range_from_html(html_path)
 
     try:
-        result = parse_tafseer_html(html_path, is_intro)
+        result = parse_tafseer_html(html_path, is_intro, verse_range)
     except Exception as exc:
         report.fail_count += 1
         report.errors.append(f"Error processing Surah {surah['surah_num']} ({surah['surah_name']}), File '{filename}': {exc}")
@@ -371,8 +415,7 @@ def process_html_file(surah, filename, surah_data, report):
         surah_data["introduction_sha256"] = result["introduction_sha256"]
     else:
         page = result["page_data"]
-        stem = Path(filename).stem
-        page["verse_range"] = stem if parse_verse_range(stem) else extract_verse_range_from_html(html_path)
+        page["verse_range"] = verse_range
         surah_data["tafseer_pages"].append(page)
 
     report.success_count += 1
@@ -398,9 +441,23 @@ def generate_json(surahs, show_progress=True):
     if bar:
         bar.finish()
 
-    write_json(UNIFIED_JSON_PATH, {"surahs": all_surahs_data}, report, "Failed to write unified JSON file")
+    write_json(UNIFIED_JSON_PATH, build_unified_json_data(all_surahs_data), report, "Failed to write unified JSON file")
     write_generation_report(report)
     return report, all_surahs_data
+
+
+def build_unified_json_data(fallback_surahs):
+    surahs = []
+    for path in sorted(OUTPUT_JSON_DIR.glob("*.json"), key=surah_json_sort_key):
+        try:
+            surahs.append(json.loads(path.read_text(encoding="utf-8")))
+        except Exception:
+            return {"surahs": fallback_surahs}
+    return {"surahs": surahs or fallback_surahs}
+
+
+def surah_json_sort_key(path):
+    return int(path.stem) if path.stem.isdigit() else 999
 
 
 def write_json(path, data, report, error_prefix):
@@ -451,7 +508,7 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     requested_surah = None if args.all else args.surah
 
-    print("Scanning Surah folders in 'التفسير' directory...")
+    print("Scanning Surah folders in 'tafseer html' directory...")
     surahs = filter_surahs(scan_source_surahs(), requested_surah)
     total_files = sum(len(surah["files"]) for surah in surahs)
 
